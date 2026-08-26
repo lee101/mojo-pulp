@@ -4,11 +4,14 @@ The caller owns the tableau and all result buffers. The kernel uses Bland's
 entering rule, which trades a little speed for deterministic anti-cycling.
 """
 
+from max.algorithm import sync_parallelize
 from std.math import abs
+from std.sys import simd_width_of
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
-comptime W = 4
+comptime W = simd_width_of[DType.float64]()
+comptime PARALLEL_PIVOT_ELEMENTS = 1_000_000
 
 
 def fp(addr: Int) -> Ptr:
@@ -17,6 +20,70 @@ def fp(addr: Int) -> Ptr:
 
 def ip(addr: Int) -> IPtr:
     return IPtr(unsafe_from_address=addr)
+
+
+def zero(buffer: Ptr, size: Int):
+    var zeros = SIMD[DType.float64, W](0.0)
+    var i = 0
+    while i + W <= size:
+        buffer.store(i, zeros)
+        i += W
+    while i < size:
+        buffer[i] = 0.0
+        i += 1
+
+
+def scaled_copy(dst: Ptr, src: Ptr, size: Int, scale: Float64):
+    var factor = SIMD[DType.float64, W](scale)
+    var i = 0
+    while i + W <= size:
+        dst.store(i, factor * src.load[width=W](i))
+        i += W
+    while i < size:
+        dst[i] = scale * src[i]
+        i += 1
+
+
+def add_scaled(dst: Ptr, src: Ptr, size: Int, scale: Float64):
+    var factor = SIMD[DType.float64, W](scale)
+    var i = 0
+    while i + W <= size:
+        dst.store(
+            i,
+            dst.load[width=W](i) + factor * src.load[width=W](i),
+        )
+        i += W
+    while i < size:
+        dst[i] += scale * src[i]
+        i += 1
+
+
+def eliminate_row(
+    tableau: Ptr,
+    prow: Ptr,
+    cols: Int,
+    pivot_row: Int,
+    pivot_col: Int,
+    r: Int,
+):
+    if r == pivot_row:
+        return
+    var row = tableau + r * cols
+    var factor = row[pivot_col]
+    if factor == 0.0:
+        return
+    var vf = SIMD[DType.float64, W](factor)
+    var j = 0
+    while j + W <= cols:
+        row.store(
+            j,
+            row.load[width=W](j) - vf * prow.load[width=W](j),
+        )
+        j += W
+    while j < cols:
+        row[j] -= factor * prow[j]
+        j += 1
+    row[pivot_col] = 0.0
 
 
 def pivot(tableau: Ptr, rows: Int, cols: Int, pivot_row: Int, pivot_col: Int):
@@ -32,23 +99,15 @@ def pivot(tableau: Ptr, rows: Int, cols: Int, pivot_row: Int, pivot_col: Int):
         j += 1
     prow[pivot_col] = 1.0
 
-    for r in range(rows):
-        if r != pivot_row:
-            var row = tableau + r * cols
-            var factor = row[pivot_col]
-            if factor != 0.0:
-                var vf = SIMD[DType.float64, W](factor)
-                j = 0
-                while j + W <= cols:
-                    row.store(
-                        j,
-                        row.load[width=W](j) - vf * prow.load[width=W](j),
-                    )
-                    j += W
-                while j < cols:
-                    row[j] -= factor * prow[j]
-                    j += 1
-                row[pivot_col] = 0.0
+    if rows * cols >= PARALLEL_PIVOT_ELEMENTS:
+        @__parameter
+        def update_row(r: Int):
+            eliminate_row(tableau, prow, cols, pivot_row, pivot_col, r)
+
+        sync_parallelize[update_row](rows)
+    else:
+        for r in range(rows):
+            eliminate_row(tableau, prow, cols, pivot_row, pivot_col, r)
 
 
 def simplex(
@@ -149,8 +208,7 @@ def mp_solve_lp(
     var rows = m + 1
     var variable_cols = n + 2 * m
     var cols = variable_cols + 1
-    for i in range(rows * cols):
-        tableau[i] = 0.0
+    zero(tableau, rows * cols)
 
     var artificial_count = 0
     for i in range(m):
@@ -162,8 +220,7 @@ def mp_solve_lp(
             rhs = -rhs
             row_sense = -row_sense
         var row = tableau + (i + 1) * cols
-        for j in range(n):
-            row[j] = sign * a[i * n + j]
+        scaled_copy(row, a + i * n, n, sign)
         row[cols - 1] = rhs
 
         var slack_col = n + i
@@ -185,8 +242,7 @@ def mp_solve_lp(
             tableau[artificial_col] = 1.0
             if Int(basis[i]) == artificial_col:
                 var row = tableau + (i + 1) * cols
-                for j in range(cols):
-                    tableau[j] -= row[j]
+                add_scaled(tableau, row, cols, -1.0)
 
         var phase_one = simplex(
             tableau, basis, rows, cols, variable_cols, max_iter, tolerance
@@ -223,18 +279,15 @@ def mp_solve_lp(
                     )
                     basis[i] = Int64(replacement)
 
-    for j in range(cols):
-        tableau[j] = 0.0
-    for j in range(n):
-        tableau[j] = -c[j]
+    zero(tableau, cols)
+    scaled_copy(tableau, c, n, -1.0)
     for i in range(m):
         var basic = Int(basis[i])
         if basic < n:
             var coefficient = c[basic]
             if coefficient != 0.0:
                 var row = tableau + (i + 1) * cols
-                for j in range(cols):
-                    tableau[j] += coefficient * row[j]
+                add_scaled(tableau, row, cols, coefficient)
 
     var remaining = max_iter - phase_one_iterations
     if remaining < 0:
@@ -251,8 +304,7 @@ def mp_solve_lp(
         stats[1] = Float64(max_iter)
         return 0
 
-    for j in range(n):
-        solution[j] = 0.0
+    zero(solution, n)
     for i in range(m):
         var basic = Int(basis[i])
         if basic < n:

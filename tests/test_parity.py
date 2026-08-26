@@ -401,6 +401,34 @@ def test_empty_problem_uses_non_null_ffi_buffers():
     assert problem.solve(mp.MOJO_CMD(msg=False)) == mp.LpStatusOptimal
 
 
+def test_dense_kernel_simd_tail_matches_expected_solution():
+    status, solution, _ = solve_dense(
+        np.array([[1.0, 1.0]]),
+        np.array([4.0]),
+        np.array([3.0, 2.0]),
+        np.array([-1], dtype=np.int64),
+        max_iter=10,
+        tolerance=1e-9,
+    )
+    assert status == mp.LpStatusOptimal
+    assert solution == pytest.approx([4.0, 0.0])
+
+
+def test_large_dense_kernel_parallel_pivot_matches_expected_solution():
+    rows = 720
+    status, solution, stats = solve_dense(
+        np.ones((rows, 1), dtype=np.float64),
+        np.ones(rows, dtype=np.float64),
+        np.ones(1, dtype=np.float64),
+        np.full(rows, -1, dtype=np.int64),
+        max_iter=10,
+        tolerance=1e-9,
+    )
+    assert status == mp.LpStatusOptimal
+    assert solution == pytest.approx([1.0])
+    assert stats[1] == 1
+
+
 def test_documented_helpers_solver_alias_and_rounding():
     x = mp.LpVariable("x", lowBound=2)
     assert mp.value(x) is None

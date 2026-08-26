@@ -115,13 +115,29 @@ def solve_dense(
     if not math.isfinite(tolerance) or tolerance <= 0.0:
         raise ValueError("tolerance must be a finite positive number")
 
-    # These local owners stay alive until the synchronous ctypes call returns.
-    # At least one element is allocated for inputs that the kernel does not
-    # dereference when m or n is zero, keeping every C ABI pointer non-null.
     a = np.ascontiguousarray(a, dtype=np.float64)
     b = np.ascontiguousarray(b, dtype=np.float64)
     c = np.ascontiguousarray(c, dtype=np.float64)
     senses = np.ascontiguousarray(senses, dtype=np.int64)
+    return _solve_dense_contiguous(
+        a, b, c, senses, max_iter=max_iter, tolerance=tolerance
+    )
+
+
+def _solve_dense_contiguous(
+    a: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    senses: np.ndarray,
+    *,
+    max_iter: int,
+    tolerance: float,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Solve validated, contiguous float64/int64 buffers without copying."""
+    m, n = a.shape
+    # These local owners stay alive until the synchronous ctypes call returns.
+    # At least one element is allocated for inputs that the kernel does not
+    # dereference when m or n is zero, keeping every C ABI pointer non-null.
     a_ffi = a if a.size else np.empty(1, dtype=np.float64)
     b_ffi = b if b.size else np.empty(1, dtype=np.float64)
     c_ffi = c if c.size else np.empty(1, dtype=np.float64)

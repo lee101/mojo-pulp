@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from . import constants
-from ._lib import solve_dense
+from ._lib import _solve_dense_contiguous
 
 
 _NAME_TRANSLATION = str.maketrans(" -+[]", "_____")
@@ -637,8 +637,8 @@ class LpProblem:
 
 
 class _CompiledLP:
-    def __init__(self, problem: LpProblem, branches):
-        self.variables = problem.variables()
+    def __init__(self, problem: LpProblem, branches, variables=None):
+        self.variables = problem.variables() if variables is None else variables
         self.transforms: dict[LpVariable, tuple[float, list[tuple[int, float]]]] = {}
         upper_rows: list[tuple[int, float]] = []
         column_count = 0
@@ -661,34 +661,41 @@ class _CompiledLP:
                 )
                 column_count += 2
 
-        rows: list[np.ndarray] = []
-        rhs: list[float] = []
-        senses: list[int] = []
+        row_count = len(problem.constraints) + len(upper_rows) + len(branches)
+        self.a = np.zeros((row_count, column_count), dtype=np.float64)
+        self.b = np.empty(row_count, dtype=np.float64)
+        self.senses = np.empty(row_count, dtype=np.int64)
+        row_index = 0
 
         def add_expression(expression, sense):
-            row = np.zeros(column_count, dtype=np.float64)
+            nonlocal row_index
+            row = self.a[row_index]
             constant = expression.constant
             for variable, coefficient in expression.items():
                 shift, terms = self.transforms[variable]
                 constant += coefficient * shift
                 for index, scale in terms:
                     row[index] += coefficient * scale
-            rows.append(row)
-            rhs.append(-constant)
-            senses.append(sense)
+            self.b[row_index] = -constant
+            self.senses[row_index] = sense
+            row_index += 1
 
         for constraint in problem.constraints.values():
             add_expression(constraint.expr, constraint.sense)
         for column, bound in upper_rows:
-            row = np.zeros(column_count, dtype=np.float64)
+            row = self.a[row_index]
             row[column] = 1.0
-            rows.append(row)
-            rhs.append(bound)
-            senses.append(constants.LpConstraintLE)
+            self.b[row_index] = bound
+            self.senses[row_index] = constants.LpConstraintLE
+            row_index += 1
         for variable, sense, bound in branches:
-            expression = LpAffineExpression(variable)
-            expression.constant -= bound
-            add_expression(expression, sense)
+            row = self.a[row_index]
+            shift, terms = self.transforms[variable]
+            for index, scale in terms:
+                row[index] = scale
+            self.b[row_index] = bound - shift
+            self.senses[row_index] = sense
+            row_index += 1
 
         objective = problem.objective or LpAffineExpression()
         c = np.zeros(column_count, dtype=np.float64)
@@ -701,13 +708,6 @@ class _CompiledLP:
         if problem.sense == constants.LpMinimize:
             c *= -1.0
 
-        self.a = (
-            np.vstack(rows)
-            if rows
-            else np.empty((0, column_count), dtype=np.float64)
-        )
-        self.b = np.asarray(rhs, dtype=np.float64)
-        self.senses = np.asarray(senses, dtype=np.int64)
         self.c = c
 
     def values(self, transformed: np.ndarray) -> dict[LpVariable, float]:
@@ -777,9 +777,9 @@ class MojoSolver:
     def available(self) -> bool:
         return True
 
-    def _relaxation(self, problem, branches):
-        compiled = _CompiledLP(problem, branches)
-        status, transformed, stats = solve_dense(
+    def _relaxation(self, problem, branches, variables):
+        compiled = _CompiledLP(problem, branches, variables)
+        status, transformed, stats = _solve_dense_contiguous(
             compiled.a,
             compiled.b,
             compiled.c,
@@ -824,7 +824,9 @@ class MojoSolver:
                 break
             branches = stack.pop()
             self.node_count += 1
-            status, values, objective = self._relaxation(problem, branches)
+            status, values, objective = self._relaxation(
+                problem, branches, variables
+            )
             if status == constants.LpStatusUnbounded and self.node_count == 1:
                 terminal_status = status
                 break
@@ -869,7 +871,8 @@ class MojoSolver:
         if incumbent_values is not None:
             for variable in variables:
                 variable.varValue = incumbent_values[variable]
-            problem.roundSolution()
+            for variable in variables:
+                variable.round()
             for constraint in problem.constraints.values():
                 residual = constraint.value()
                 constraint.slack = (

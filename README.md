@@ -106,8 +106,8 @@ PuLP's values.
 
 ## Benchmarks
 
-Measured on 2026-07-29 on an Intel Xeon E5-2697 v4 host running
-Linux 6.8.0, using the pinned Mojo `1.0.0b3.dev2026072406`, PuLP 2.8.0, and
+Measured on 2026-08-26 on an Intel Xeon E5-2697 v4 host running
+Linux 6.8.0, using the pinned Mojo `1.1.0.dev2026081105`, PuLP 2.8.0, and
 COIN-OR CBC 2.10.13. Times are the best of three runs under the machine-wide
 lock from `pixi run bench`.
 Solve rows include model-to-matrix conversion for mojo-pulp and PuLP's normal
@@ -115,11 +115,11 @@ external CBC invocation.
 
 | benchmark | mojo-pulp | PuLP/CBC | upstream / Mojo |
 |---|---:|---:|---:|
-| Dense LP solve (60 rows, 100 vars) | 16.303 ms | 58.717 ms | 3.60x |
-| Transportation solve (12 x 12) | 2.180 ms | 55.463 ms | 25.44x |
-| Binary assignment solve (8 x 8) | 1.266 ms | 39.105 ms | 30.88x |
-| Tiny LP solve | 0.207 ms | 30.013 ms | 145.03x |
-| Dense model construction | 9.084 ms | 61.407 ms | 6.76x |
+| Dense LP solve (60 rows, 100 vars) | 12.944 ms | 61.551 ms | 4.76x |
+| Transportation solve (12 x 12) | 0.922 ms | 41.109 ms | 44.60x |
+| Binary assignment solve (8 x 8) | 0.916 ms | 48.541 ms | 53.00x |
+| Tiny LP solve | 0.070 ms | 36.714 ms | 527.08x |
+| Dense model construction | 9.789 ms | 56.658 ms | 5.79x |
 
 The large advantage on tiny solves is mostly avoided model serialization and
 process startup, not a claim that this compact simplex outperforms CBC's
@@ -127,7 +127,11 @@ algorithms. Dense expression construction directly accumulates dot-product
 coefficients instead of allocating and copying a one-term expression for every
 product.
 
-No GPU path is included. The solver is CPU-only.
+No GPU path is included. The dominant pivot update performs about two floating-
+point operations while moving roughly 24 bytes per tableau element, or about
+0.08 FLOP/byte. That is far below the 2 FLOP/byte threshold where transferring
+and launching this kernel on a GPU could be justified, so the solver remains
+CPU-only.
 
 Run the benchmark again on the current machine with:
 
