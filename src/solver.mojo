@@ -4,14 +4,12 @@ The caller owns the tableau and all result buffers. The kernel uses Bland's
 entering rule, which trades a little speed for deterministic anti-cycling.
 """
 
-from max.algorithm import sync_parallelize
 from std.math import abs
 from std.sys import simd_width_of
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime PARALLEL_PIVOT_ELEMENTS = 1_000_000
 
 
 def fp(addr: Int) -> Ptr:
@@ -37,7 +35,7 @@ def scaled_copy(dst: Ptr, src: Ptr, size: Int, scale: Float64):
     var factor = SIMD[DType.float64, W](scale)
     var i = 0
     while i + W <= size:
-        dst.store(i, factor * src.load[width=W](i))
+        dst.store(i, factor * src.unsafe_load[width=W](i))
         i += W
     while i < size:
         dst[i] = scale * src[i]
@@ -50,7 +48,7 @@ def add_scaled(dst: Ptr, src: Ptr, size: Int, scale: Float64):
     while i + W <= size:
         dst.store(
             i,
-            dst.load[width=W](i) + factor * src.load[width=W](i),
+            dst.unsafe_load[width=W](i) + factor * src.unsafe_load[width=W](i),
         )
         i += W
     while i < size:
@@ -77,7 +75,7 @@ def eliminate_row(
     while j + W <= cols:
         row.store(
             j,
-            row.load[width=W](j) - vf * prow.load[width=W](j),
+            row.unsafe_load[width=W](j) - vf * prow.unsafe_load[width=W](j),
         )
         j += W
     while j < cols:
@@ -92,22 +90,15 @@ def pivot(tableau: Ptr, rows: Int, cols: Int, pivot_row: Int, pivot_col: Int):
     var denom = SIMD[DType.float64, W](divisor)
     var j = 0
     while j + W <= cols:
-        prow.store(j, prow.load[width=W](j) / denom)
+        prow.store(j, prow.unsafe_load[width=W](j) / denom)
         j += W
     while j < cols:
         prow[j] /= divisor
         j += 1
     prow[pivot_col] = 1.0
 
-    if rows * cols >= PARALLEL_PIVOT_ELEMENTS:
-        @__parameter
-        def update_row(r: Int):
-            eliminate_row(tableau, prow, cols, pivot_row, pivot_col, r)
-
-        sync_parallelize[update_row](rows)
-    else:
-        for r in range(rows):
-            eliminate_row(tableau, prow, cols, pivot_row, pivot_col, r)
+    for r in range(rows):
+        eliminate_row(tableau, prow, cols, pivot_row, pivot_col, r)
 
 
 def simplex(

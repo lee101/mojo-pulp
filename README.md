@@ -131,7 +131,9 @@ No GPU path is included. The dominant pivot update performs about two floating-
 point operations while moving roughly 24 bytes per tableau element, or about
 0.08 FLOP/byte. That is far below the 2 FLOP/byte threshold where transferring
 and launching this kernel on a GPU could be justified, so the solver remains
-CPU-only.
+CPU-only. The same holds for splitting the pivot across CPU threads: row
+elimination is a dense streaming axpy at 0.08 FLOP/byte, so the pivot loop runs
+serially on the calling thread.
 
 Run the benchmark again on the current machine with:
 
